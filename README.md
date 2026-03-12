@@ -1,5 +1,5 @@
 # ComfyUI_Detonate
-
+![ColorCurves_RotoBezier](ColorCurves_RotoBezier.jpg)
 **Professional compositing nodes for ComfyUI** - bringing Nuke and DaVinci Fusion workflows to AI-powered image generation.
 
 [![Version](https://img.shields.io/badge/version-0.11.0-blue.svg)](DEVLOG.md)
