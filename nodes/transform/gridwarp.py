@@ -158,138 +158,47 @@ class DetonateGridWarp:
                 dst_points[row, col, 0] += dx
                 dst_points[row, col, 1] += dy
 
-        # Process each image in batch
-        result = []
-        for b in range(B):
-            img_np = image[b].cpu().numpy()
+        # Create normalized destination points [-1, 1] for grid_sample
+        # dst_points shape: [grid_resolution_y, grid_resolution_x, 2]
+        dst_points[..., 0] = (dst_points[..., 0] / max(1, W - 1)) * 2.0 - 1.0
+        dst_points[..., 1] = (dst_points[..., 1] / max(1, H - 1)) * 2.0 - 1.0
+        
+        # Convert to tensor and prepare for interpolation
+        # Shape: [1, 2, grid_resolution_y, grid_resolution_x]
+        dst_tensor = torch.from_numpy(dst_points).to(device=device, dtype=torch.float32)
+        dst_tensor = dst_tensor.permute(2, 0, 1).unsqueeze(0)
+        
+        # Interpolate the sparse grid of coordinates to dense [1, 2, H, W]
+        dense_grid = torch.nn.functional.interpolate(
+            dst_tensor, 
+            size=(H, W), 
+            mode='bilinear', 
+            align_corners=True
+        )
+        
+        # Shape for grid_sample: [1, H, W, 2]
+        dense_grid = dense_grid.squeeze(0).permute(1, 2, 0).unsqueeze(0)
+        
+        # Map edge modes
+        if edge_mode == "Black":
+            padding_mode = 'zeros'
+        else:  # Clamp
+            padding_mode = 'border'
 
-            # Create warp map using piecewise affine transformation
-            warped = self._apply_grid_warp(
-                img_np,
-                src_points,
-                dst_points,
-                grid_resolution_x,
-                grid_resolution_y,
-                edge_mode
-            )
-
-            result.append(torch.from_numpy(warped).to(device))
-
-        output = torch.stack(result, dim=0)
+        # Process each image in batch natively on GPU
+        input_img = image.permute(0, 3, 1, 2)  # [B, C, H, W]
+        
+        # Expand grid for batch size if needed
+        dense_grid = dense_grid.expand(B, -1, -1, -1)
+        
+        warped = torch.nn.functional.grid_sample(
+            input_img,
+            dense_grid,
+            mode='bilinear',
+            padding_mode=padding_mode,
+            align_corners=True
+        )
+        
+        output = warped.permute(0, 2, 3, 1)  # [B, H, W, C]
 
         return (output,)
-
-    def _apply_grid_warp(
-        self,
-        image: np.ndarray,
-        src_points: np.ndarray,
-        dst_points: np.ndarray,
-        grid_cols: int,
-        grid_rows: int,
-        edge_mode: str
-    ) -> np.ndarray:
-        """
-        Apply piecewise affine warp using grid control points.
-
-        Uses OpenCV's remap with piecewise affine approximation.
-
-        Args:
-            image: Input image [H, W, C]
-            src_points: Source grid points [rows, cols, 2]
-            dst_points: Destination grid points [rows, cols, 2]
-            grid_cols: Grid columns
-            grid_rows: Grid rows
-            edge_mode: Edge handling
-
-        Returns:
-            Warped image [H, W, C]
-        """
-        H, W = image.shape[:2]
-
-        # Create dense displacement map from sparse grid
-        # For each pixel, find which grid cell it's in and interpolate
-
-        # Create pixel coordinate grid
-        y_coords, x_coords = np.meshgrid(
-            np.arange(H, dtype=np.float32),
-            np.arange(W, dtype=np.float32),
-            indexing='ij'
-        )
-
-        # Initialize displacement maps
-        map_x = np.zeros((H, W), dtype=np.float32)
-        map_y = np.zeros((H, W), dtype=np.float32)
-
-        # For each grid cell, compute piecewise affine transform
-        for row in range(grid_rows - 1):
-            for col in range(grid_cols - 1):
-                # Get quad corners (source and destination)
-                src_quad = np.array([
-                    src_points[row, col],
-                    src_points[row, col + 1],
-                    src_points[row + 1, col + 1],
-                    src_points[row + 1, col]
-                ], dtype=np.float32)
-
-                dst_quad = np.array([
-                    dst_points[row, col],
-                    dst_points[row, col + 1],
-                    dst_points[row + 1, col + 1],
-                    dst_points[row + 1, col]
-                ], dtype=np.float32)
-
-                # Get bounding box of source quad
-                x_min = int(np.floor(src_quad[:, 0].min()))
-                x_max = int(np.ceil(src_quad[:, 0].max()))
-                y_min = int(np.floor(src_quad[:, 1].min()))
-                y_max = int(np.ceil(src_quad[:, 1].max()))
-
-                # Clamp to image bounds
-                x_min = max(0, x_min)
-                x_max = min(W, x_max)
-                y_min = max(0, y_min)
-                y_max = min(H, y_max)
-
-                if x_max <= x_min or y_max <= y_min:
-                    continue
-
-                # Compute perspective transform for this quad
-                # Use first 3 points for affine (faster than full perspective)
-                M = cv2.getAffineTransform(src_quad[:3], dst_quad[:3])
-
-                # Apply transform to pixels in this cell
-                for y in range(y_min, y_max):
-                    for x in range(x_min, x_max):
-                        # Check if point is inside quad (simple bbox check for speed)
-                        # For production, could use proper point-in-polygon
-                        if (src_quad[0, 0] <= x <= src_quad[1, 0] and
-                            src_quad[0, 1] <= y <= src_quad[2, 1]):
-
-                            # Apply affine transform
-                            src_pt = np.array([x, y, 1], dtype=np.float32)
-                            dst_pt = M @ src_pt
-
-                            map_x[y, x] = dst_pt[0]
-                            map_y[y, x] = dst_pt[1]
-
-        # Fill any unmapped pixels with identity (edge cases)
-        unmapped = (map_x == 0) & (map_y == 0)
-        map_x[unmapped] = x_coords[unmapped]
-        map_y[unmapped] = y_coords[unmapped]
-
-        # Apply warp using remap
-        if edge_mode == "Black":
-            border_mode = cv2.BORDER_CONSTANT
-        else:  # Clamp
-            border_mode = cv2.BORDER_REPLICATE
-
-        warped = cv2.remap(
-            image,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=border_mode,
-            borderValue=0.0
-        )
-
-        return warped

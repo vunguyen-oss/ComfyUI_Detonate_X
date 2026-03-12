@@ -76,7 +76,7 @@ class DetonateColorCurves:
                     "default": "0,0;1,1",
                     "multiline": False,
                 }),
-                "preset": (["none"] + list(PRESETS.keys()), {
+                "preset": (["none"] + list(cls.PRESETS.keys()), {
                     "default": "none",
                 }),
                 "clamp_output": ("BOOLEAN", {
@@ -122,8 +122,13 @@ class DetonateColorCurves:
         rgb = image_rgba[:, :, :, :3]
         alpha = image_rgba[:, :, :, 3:4]
 
-        # Apply preset if selected
-        if preset != "none" and preset in self.PRESETS:
+        # Apply preset logic
+        # We check if the incoming curves are actually different from default
+        # If they are default AND a preset is selected, we use the preset.
+        # Otherwise, we trust the interactive curve data from the frontend.
+        is_default_master = (master_curve == "0,0;1,1")
+        
+        if preset != "none" and preset in self.PRESETS and is_default_master:
             master_curve = self.PRESETS[preset]
 
         # Parse curves
@@ -205,7 +210,10 @@ class DetonateColorCurves:
         curve_points: list
     ) -> torch.Tensor:
         """
-        Apply curve to tensor values using linear interpolation.
+        Apply curve to tensor values using vectorized Monotonic Cubic Spline interpolation.
+        
+        This ensures smooth transitions without the "kinks" of linear interpolation, 
+        and prevents overshooting (staying monotonic).
 
         Args:
             tensor: Input tensor (any shape)
@@ -214,50 +222,98 @@ class DetonateColorCurves:
         Returns:
             Mapped tensor (same shape)
         """
-        # Flatten for lookup
-        original_shape = tensor.shape
-        flat_values = tensor.flatten()
+        if len(curve_points) < 2:
+            return tensor
+            
+        # Convert points to tensors
+        xs = torch.tensor([p[0] for p in curve_points], dtype=tensor.dtype, device=tensor.device)
+        ys = torch.tensor([p[1] for p in curve_points], dtype=tensor.dtype, device=tensor.device)
+        
+        # Sort points by x
+        xs, indices = torch.sort(xs)
+        ys = ys[indices]
+        
+        # If we have only 2 points, it's just linear
+        if len(xs) == 2:
+            # handle extrapolation
+            mask_low = tensor <= xs[0]
+            mask_high = tensor >= xs[-1]
+            mask_mid = ~mask_low & ~mask_high
+            
+            result = torch.empty_like(tensor)
+            result[mask_low] = ys[0]
+            result[mask_high] = ys[-1]
+            
+            dx = xs[1] - xs[0]
+            if dx > 1e-7:
+                t = (tensor[mask_mid] - xs[0]) / dx
+                result[mask_mid] = ys[0] + t * (ys[1] - ys[0])
+            else:
+                result[mask_mid] = ys[0]
+            return result
 
-        # Create lookup table using linear interpolation
-        result = torch.zeros_like(flat_values)
+        # Monotonic Cubic Interpolation (Fritsch-Carlson)
+        # 1. Calculate slopes between points
+        dx = xs[1:] - xs[:-1]
+        dy = ys[1:] - ys[:-1]
+        ms = dy / torch.clamp(dx, min=1e-7)  # Slopes between segments
+        
+        # 2. Calculate tangents at each point
+        num_pts = len(xs)
+        tangents = torch.zeros(num_pts, dtype=tensor.dtype, device=tensor.device)
+        
+        # Use average of neighbor slopes correctly for interior points
+        tangents[1:-1] = (ms[:-1] + ms[1:]) / 2.0
+        tangents[0] = ms[0]
+        tangents[-1] = ms[-1]
+        
+        # 3. Enforce monotonicity (Fritsch-Carlson)
+        # Avoid overshoot by scaling tangents if needed
+        for i in range(num_pts - 1):
+            if ms[i] == 0:
+                tangents[i] = 0.0
+                tangents[i+1] = 0.0
+            else:
+                alpha = tangents[i] / ms[i]
+                beta = tangents[i+1] / ms[i]
+                if alpha**2 + beta**2 > 9.0:
+                    tau = 3.0 / torch.sqrt(torch.tensor(alpha**2 + beta**2, device=tensor.device))
+                    tangents[i] = tau * alpha * ms[i]
+                    tangents[i+1] = tau * beta * ms[i]
 
-        for i, value in enumerate(flat_values):
-            result[i] = self._interpolate_curve(value.item(), curve_points)
-
-        # Reshape back
-        result = result.reshape(original_shape)
-
+        # 4. Interpolate
+        result = torch.empty_like(tensor)
+        
+        # Extrapolation
+        result[tensor <= xs[0]] = ys[0]
+        result[tensor >= xs[-1]] = ys[-1]
+        
+        # Piecewise Cubic Hermite Interpolation
+        for i in range(num_pts - 1):
+            x_i, x_next = xs[i], xs[i+1]
+            y_i, y_next = ys[i], ys[i+1]
+            m_i, m_next = tangents[i], tangents[i+1]
+            
+            h = x_next - x_i
+            if h <= 1e-7: continue
+            
+            mask = (tensor > x_i) & (tensor < x_next)
+            if not torch.any(mask): continue
+            
+            t = (tensor[mask] - x_i) / h
+            t2 = t * t
+            t3 = t2 * t
+            
+            # Hermite basis functions
+            h00 = 2*t3 - 3*t2 + 1
+            h10 = t3 - 2*t2 + t
+            h01 = -2*t3 + 3*t2
+            h11 = t3 - t2
+            
+            result[mask] = h00 * y_i + h10 * h * m_i + h01 * y_next + h11 * h * m_next
+            
+        # Handle exact points
+        for i in range(num_pts):
+            result[tensor == xs[i]] = ys[i]
+            
         return result
-
-    def _interpolate_curve(self, x: float, points: list) -> float:
-        """
-        Linear interpolation on curve points.
-
-        Args:
-            x: Input value
-            points: Sorted list of (x, y) curve points
-
-        Returns:
-            Interpolated y value
-        """
-        # Handle out-of-range (extrapolate from nearest segment)
-        if x <= points[0][0]:
-            return points[0][1]
-        if x >= points[-1][0]:
-            return points[-1][1]
-
-        # Find bracketing points
-        for i in range(len(points) - 1):
-            x1, y1 = points[i]
-            x2, y2 = points[i + 1]
-
-            if x1 <= x <= x2:
-                # Linear interpolation
-                if x2 - x1 < 1e-7:
-                    return y1
-
-                t = (x - x1) / (x2 - x1)
-                return y1 + t * (y2 - y1)
-
-        # Should not reach here
-        return x

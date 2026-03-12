@@ -168,19 +168,33 @@ class DetonateErode:
         if operation == "erode":
             # Erosion: minimum in neighborhood
             # Trick: -max_pool(-x) = min_pool(x)
-            result_nchw = -F.max_pool2d(
+            # Use separable 1D passes for O(K) instead of O(K^2) performance
+            temp = -F.max_pool2d(
                 -tensor_nchw,
-                kernel_size=kernel_size,
+                kernel_size=(1, kernel_size),
                 stride=1,
-                padding=padding
+                padding=(0, padding)
+            )
+            result_nchw = -F.max_pool2d(
+                -temp,
+                kernel_size=(kernel_size, 1),
+                stride=1,
+                padding=(padding, 0)
             )
         else:  # "dilate"
             # Dilation: maximum in neighborhood
-            result_nchw = F.max_pool2d(
+            # Use separable 1D passes for O(K) performance
+            temp = F.max_pool2d(
                 tensor_nchw,
-                kernel_size=kernel_size,
+                kernel_size=(1, kernel_size),
                 stride=1,
-                padding=padding
+                padding=(0, padding)
+            )
+            result_nchw = F.max_pool2d(
+                temp,
+                kernel_size=(kernel_size, 1),
+                stride=1,
+                padding=(padding, 0)
             )
 
         # Convert back to [B,H,W,C]

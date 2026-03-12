@@ -7,6 +7,35 @@ For project planning, see [PLANNING.md](PLANNING.md).
 
 ---
 
+## 🎉 Version 0.11.0 - Interactive UI & GPU Speedup Update 🚀
+
+**Release Date:** 2026-03-12
+
+**MAJOR UPDATE: Interactive rotoscoping, visual color grading, and full GPU acceleration!**
+
+### High-Performance Backend (Universal Update)
+- **GPU Vectorization** ⭐⭐⭐ - Major refactor of all color nodes (`Grade`, `ColorCorrect`, `LUT`, `HueSatVal`, etc.) to use vectorized PyTorch operations. Processing is now near-instant even on 4K images.
+- **Batch/Video Support** - Added full batch support to `RotoBezier`. Generated masks now automatically match video input length.
+
+### Interactive Nodes (2 Major Upgrades)
+
+**1. RotoBezier (Interactive Pen Tool)** ⭐⭐⭐
+   - **New Professional UI** - Draw Bezier curves directly on the node.
+   - **Background Guide** - View the input image (50% opacity) while drawing.
+   - **Pen Tool Interactions** - Left-click to add sharp points, Click-drag for smooth handles.
+   - **Pro Features** - Auto-closing paths, manual handle manipulation, and aspect-ratio aware letterboxing.
+   - **GPU Rasterizer** - High-quality anti-aliasing and feathering computed on the GPU.
+
+**2. ColorCurves (Visual Grading)** ⭐⭐⭐
+   - **Interactive Graph** - Edit RGB curves visually with a modern Bezier interface.
+   - **Live Histogram** - Displays the image's tonal distribution behind the curves for precise grading.
+   - **Preset Synchronization** - Selecting a preset updates the visual graph immediately.
+   - **Smart Override** - Manual edits automatically switch the preset selection to 'None'.
+
+**Total node count: 44 nodes (Unified RotoBezier)**
+
+---
+
 ## 🎉 Version 0.10.0 - Bridge Tools Round 2: AI Inpainting Perfection! 🎨
 
 **Release Date:** 2025-01-23

@@ -105,7 +105,7 @@ class DetonateTriMapGenerator:
         output_format: str = "Trimap (0/0.5/1)"
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Generate trimap from alpha mask.
+        Generate trimap from alpha mask natively on GPU.
 
         Trimap format:
         - 1.0 (white) = Foreground (keep)
@@ -127,185 +127,60 @@ class DetonateTriMapGenerator:
         device = mask.device
         B, H, W = mask.shape
 
-        # Process each mask in batch
-        trimaps = []
-        previews = []
+        # Start with all unknown
+        trimap = torch.full_like(mask, 0.5)
 
-        for b in range(B):
-            alpha = mask[b].cpu().numpy()  # [H, W]
+        if unknown_mode in ["Threshold Only", "Full Unknown"]:
+            # Simple thresholding
+            trimap = torch.where(mask >= foreground_threshold, torch.tensor(1.0, device=device), trimap)
+            trimap = torch.where(mask <= background_threshold, torch.tensor(0.0, device=device), trimap)
+        else:  # "Edge Distance"
+            fg_mask = (mask >= foreground_threshold).float()
+            bg_mask = (mask <= background_threshold).float()
 
-            # Generate trimap
-            if unknown_mode == "Threshold Only":
-                trimap = self._threshold_trimap(
-                    alpha,
-                    foreground_threshold,
-                    background_threshold
-                )
-            elif unknown_mode == "Full Unknown":
-                trimap = self._full_unknown_trimap(
-                    alpha,
-                    foreground_threshold,
-                    background_threshold
-                )
-            else:  # "Edge Distance"
-                trimap = self._edge_distance_trimap(
-                    alpha,
-                    foreground_threshold,
-                    background_threshold,
-                    unknown_width
-                )
+            if unknown_width < 0.1:
+                trimap = torch.where(fg_mask == 1.0, torch.tensor(1.0, device=device), trimap)
+                trimap = torch.where(bg_mask == 1.0, torch.tensor(0.0, device=device), trimap)
+            else:
+                kernel_size = int(unknown_width * 2 + 1)
+                if kernel_size % 2 == 0:
+                    kernel_size += 1
+                kernel_size = max(3, kernel_size)
+                padding = kernel_size // 2
 
-            trimaps.append(torch.from_numpy(trimap).to(device))
+                iterations = max(1, int(unknown_width / 2))
 
-            # Generate RGB preview
-            preview = self._create_preview(trimap)
-            previews.append(torch.from_numpy(preview).to(device))
+                # Prepare NCHW 
+                fg_nchw = (-fg_mask).unsqueeze(1)  # Negated for erosion via max_pool
+                bg_nchw = bg_mask.unsqueeze(1)
 
-        trimap_output = torch.stack(trimaps, dim=0)
-        preview_output = torch.stack(previews, dim=0)
+                for _ in range(iterations):
+                    fg_nchw = torch.nn.functional.max_pool2d(
+                        fg_nchw, kernel_size=kernel_size, stride=1, padding=padding
+                    )
+                    bg_nchw = torch.nn.functional.max_pool2d(
+                        bg_nchw, kernel_size=kernel_size, stride=1, padding=padding
+                    )
 
-        return (trimap_output, preview_output)
+                fg_eroded = (-fg_nchw).squeeze(1)
+                bg_dilated = bg_nchw.squeeze(1)
 
-    def _threshold_trimap(
-        self,
-        alpha: np.ndarray,
-        fg_thresh: float,
-        bg_thresh: float
-    ) -> np.ndarray:
-        """
-        Simple threshold-based trimap.
+                trimap = torch.where(fg_eroded == 1.0, torch.tensor(1.0, device=device), trimap)
+                trimap = torch.where(bg_dilated == 1.0, torch.tensor(0.0, device=device), trimap)
 
-        Args:
-            alpha: Input alpha [H, W]
-            fg_thresh: Foreground threshold
-            bg_thresh: Background threshold
-
-        Returns:
-            Trimap [H, W] with values 0.0, 0.5, 1.0
-        """
-        trimap = np.full_like(alpha, 0.5, dtype=np.float32)  # Start with unknown
-
-        # Foreground: alpha > fg_thresh
-        trimap[alpha >= fg_thresh] = 1.0
-
-        # Background: alpha < bg_thresh
-        trimap[alpha <= bg_thresh] = 0.0
-
-        return trimap
-
-    def _full_unknown_trimap(
-        self,
-        alpha: np.ndarray,
-        fg_thresh: float,
-        bg_thresh: float
-    ) -> np.ndarray:
-        """
-        Trimap with everything between thresholds as unknown.
-
-        Args:
-            alpha: Input alpha [H, W]
-            fg_thresh: Foreground threshold
-            bg_thresh: Background threshold
-
-        Returns:
-            Trimap [H, W] with values 0.0, 0.5, 1.0
-        """
-        trimap = np.full_like(alpha, 0.5, dtype=np.float32)
-
-        # Foreground: alpha >= fg_thresh
-        trimap[alpha >= fg_thresh] = 1.0
-
-        # Background: alpha <= bg_thresh
-        trimap[alpha <= bg_thresh] = 0.0
-
-        # Everything else stays unknown (0.5)
-
-        return trimap
-
-    def _edge_distance_trimap(
-        self,
-        alpha: np.ndarray,
-        fg_thresh: float,
-        bg_thresh: float,
-        unknown_width: float
-    ) -> np.ndarray:
-        """
-        Generate trimap with unknown region based on distance from edges.
-
-        This is the most useful mode - creates an unknown band around
-        the foreground/background boundary.
-
-        Args:
-            alpha: Input alpha [H, W]
-            fg_thresh: Foreground threshold
-            bg_thresh: Background threshold
-            unknown_width: Width of unknown region (pixels)
-
-        Returns:
-            Trimap [H, W] with values 0.0, 0.5, 1.0
-        """
-        # Start with threshold-based classification
-        trimap = np.full_like(alpha, 0.5, dtype=np.float32)
-
-        # Initial foreground and background
-        fg_mask = (alpha >= fg_thresh).astype(np.uint8)
-        bg_mask = (alpha <= bg_thresh).astype(np.uint8)
-
-        if unknown_width < 0.1:
-            # No unknown region, just use thresholds
-            trimap[fg_mask == 1] = 1.0
-            trimap[bg_mask == 1] = 0.0
-            return trimap
-
-        # Erode foreground to create unknown band
-        kernel_size = int(unknown_width * 2 + 1)
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        kernel_size = max(3, kernel_size)
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-        iterations = max(1, int(unknown_width / 2))
-
-        # Eroded foreground = definite foreground
-        fg_eroded = cv2.erode(fg_mask, kernel, iterations=iterations)
-
-        # Dilated background = definite background
-        bg_dilated = cv2.dilate(bg_mask, kernel, iterations=iterations)
-
-        # Apply to trimap
-        trimap[fg_eroded == 1] = 1.0  # Definite foreground
-        trimap[bg_dilated == 1] = 0.0  # Definite background
-        # Everything else stays unknown (0.5)
-
-        return trimap
-
-    def _create_preview(self, trimap: np.ndarray) -> np.ndarray:
-        """
-        Create RGB visualization of trimap.
-
-        Foreground = Green
-        Background = Red
-        Unknown = Blue
-
-        Args:
-            trimap: Trimap [H, W] with values 0.0, 0.5, 1.0
-
-        Returns:
-            RGB preview [H, W, 3]
-        """
-        H, W = trimap.shape
-        preview = np.zeros((H, W, 3), dtype=np.float32)
-
+        # Generate RGB preview
+        preview = torch.zeros(B, H, W, 3, dtype=torch.float32, device=device)
+        
         # Foreground = Green (0, 1, 0)
-        fg_mask = trimap >= 0.9
-        preview[fg_mask] = [0.0, 1.0, 0.0]
-
+        fg = trimap >= 0.9
+        preview[..., 1] = torch.where(fg, torch.tensor(1.0, device=device), preview[..., 1])
+        
         # Background = Red (1, 0, 0)
-        bg_mask = trimap <= 0.1
-        preview[bg_mask] = [1.0, 0.0, 0.0]
-
+        bg = trimap <= 0.1
+        preview[..., 0] = torch.where(bg, torch.tensor(1.0, device=device), preview[..., 0])
+        
         # Unknown = Blue (0, 0, 1)
-        unknown_mask = (trimap > 0.1) & (trimap < 0.9)
-        preview[unknown_mask] = [0.0, 0.0, 1.0]
+        unk = (trimap > 0.1) & (trimap < 0.9)
+        preview[..., 2] = torch.where(unk, torch.tensor(1.0, device=device), preview[..., 2])
 
-        return preview
+        return (trimap, preview)

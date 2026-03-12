@@ -175,32 +175,38 @@ class DetonateEdgeDefringe:
 
         B, H, W, _ = rgb.shape
 
-        # Process each image in batch
-        result = []
-        for b in range(B):
-            rgb_np = rgb[b].cpu().numpy()
-            alpha_np = alpha[b, :, :, 0].cpu().numpy()
+        kernel_size = int(strength) * 2 + 1
+        padding = int(strength)
 
-            # Erode alpha to shrink edge
-            kernel_size = int(strength) * 2 + 1
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-            alpha_eroded = cv2.erode(alpha_np, kernel, iterations=1)
+        # Process the entire batch at once on the GPU
+        # Erode alpha to shrink edge (minimum in neighborhood)
+        alpha_nchw = alpha.permute(0, 3, 1, 2)  # [B, 1, H, W]
+        alpha_eroded_nchw = -torch.nn.functional.max_pool2d(
+            -alpha_nchw,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding
+        )
+        alpha_eroded = alpha_eroded_nchw.permute(0, 2, 3, 1)  # [B, H, W, 1]
 
-            # Create edge mask (pixels that were removed)
-            edge_mask = (alpha_np > 0.01) & (alpha_eroded < 0.01)
+        # Create edge mask (pixels that were removed)
+        edge_mask = (alpha > 0.01) & (alpha_eroded < 0.01)
 
-            # Dilate the RGB to fill edge pixels with interior color
-            rgb_uint8 = (np.clip(rgb_np, 0, 1) * 255).astype(np.uint8)
-            rgb_dilated = cv2.dilate(rgb_uint8, kernel, iterations=1).astype(np.float32) / 255.0
+        # Dilate the RGB to fill edge pixels with interior color (maximum in neighborhood)
+        rgb_nchw = rgb.permute(0, 3, 1, 2)  # [B, 3, H, W]
+        rgb_dilated_nchw = torch.nn.functional.max_pool2d(
+            rgb_nchw,
+            kernel_size=kernel_size,
+            stride=1,
+            padding=padding
+        )
+        rgb_dilated = rgb_dilated_nchw.permute(0, 2, 3, 1)  # [B, H, W, 3]
 
-            # Blend: use dilated color in edge areas, original elsewhere
-            rgb_defringed = rgb_np.copy()
-            for c in range(3):
-                rgb_defringed[..., c] = np.where(edge_mask, rgb_dilated[..., c], rgb_np[..., c])
+        # Blend: use dilated color in edge areas, original elsewhere
+        edge_mask_rgb = edge_mask.expand(-1, -1, -1, 3)
+        rgb_defringed = torch.where(edge_mask_rgb, rgb_dilated, rgb)
 
-            result.append(torch.from_numpy(rgb_defringed).to(device))
-
-        return torch.stack(result, dim=0)
+        return rgb_defringed
 
     def _color_suppress(
         self,

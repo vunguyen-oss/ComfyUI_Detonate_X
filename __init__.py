@@ -264,13 +264,11 @@ except ImportError as e:
 
 # Tier 5 Nodes - Interactive Masking ✓
 try:
-    from .nodes.matte.roto_bezier import DetonateRotoBezier, DetonateRotoBezierFromImage
+    from .nodes.matte.roto_bezier import DetonateRotoBezier
     NODE_CLASS_MAPPINGS["DetonateRotoBezier"] = DetonateRotoBezier
-    NODE_CLASS_MAPPINGS["DetonateRotoBezierFromImage"] = DetonateRotoBezierFromImage
     NODE_DISPLAY_NAME_MAPPINGS["DetonateRotoBezier"] = "RotoBezier (Detonate)"
-    NODE_DISPLAY_NAME_MAPPINGS["DetonateRotoBezierFromImage"] = "RotoBezier From Image (Detonate)"
 except ImportError as e:
-    print(f"Warning: Could not load RotoBezier nodes: {e}")
+    print(f"Warning: Could not load RotoBezier node: {e}")
 
 try:
     from .nodes.matte.mask_smoother import DetonateMaskSmoother, DetonateMaskFromColor
@@ -339,7 +337,7 @@ except ImportError as e:
 
 
 # Web directory for custom JavaScript widgets
-WEB_DIRECTORY = "./web"
+WEB_DIRECTORY = "web"
 
 # Export for ComfyUI
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]

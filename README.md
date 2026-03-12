@@ -2,13 +2,13 @@
 
 **Professional compositing nodes for ComfyUI** - bringing Nuke and DaVinci Fusion workflows to AI-powered image generation.
 
-[![Version](https://img.shields.io/badge/version-0.10.0-blue.svg)](DEVLOG.md)
-[![Nodes](https://img.shields.io/badge/nodes-45-green.svg)](#node-categories)
+[![Version](https://img.shields.io/badge/version-0.11.0-blue.svg)](DEVLOG.md)
+[![Nodes](https://img.shields.io/badge/nodes-44-green.svg)](#node-categories)
 [![License](https://img.shields.io/badge/license-MIT-orange.svg)](LICENSE)
 
 ## 🎯 What is This?
 
-ComfyUI_Detonate provides **45 professional compositing nodes** familiar to VFX artists, enabling traditional compositing workflows alongside AI image generation. All nodes support 32-bit float images with full precision, just like professional compositing software.
+ComfyUI_Detonate provides **44 professional compositing nodes** familiar to VFX artists, enabling traditional compositing workflows alongside AI image generation. All nodes support 32-bit float images with full precision, just like professional compositing software.
 
 **Perfect for:**
 - Compositors transitioning from Nuke/Fusion to AI workflows
@@ -17,23 +17,22 @@ ComfyUI_Detonate provides **45 professional compositing nodes** familiar to VFX 
 
 ## ✨ Features
 
+- **Interactive RotoBezier** - Professional-grade Pen Tool for rotoscoping directly on the node with background image support.
+- **Improved ColorCurves** - Real-time Bezier curve drawing with live histogram overlays.
+- **Batch & Video Support** - Full support for video sequences (batch tensors) across all matte and color nodes.
+- **PyTorch Vectorized GPU Acceleration** - All color and math operations are now fully GPU-accelerated for near-instant processing.
 - **AI inpainting helpers** - TriMap Generator, Seam Blender for perfect AI integration
 - **Bridge tools for GenAI workflows** - Edge defringing, displacement mapping, mesh warping
 - **Professional keying tools** - ChromaKeyer & LumaKeyer for greenscreen workflows
-- **Mask refinement tools** - Professional edge smoothing and feathering (see [masking workflow guide](DOCS/MASKING_WORKFLOW.md))
-- **Professional-grade algorithms** based on Nuke and Fusion
-
-> **Note:** RotoBezier is experimental only - use ComfyUI's MaskEditor + Mask Smoother for practical masking workflows. See [deprecation notice](nodes/matte/ROTOBEZIER_DEPRECATED.md) for details.
+- **Mask refinement tools** - Professional edge smoothing and feathering
 - **Full float image support** (0-∞ range, not limited to 0-1)
-- **User-friendly EXR loading** - File selector dropdown for easy EXR file access (see [EXR workflow guide](DOCS/EXR_WORKFLOW.md))
+- **User-friendly EXR loading** - File selector dropdown for easy EXR file access
 - **Multi-channel EXR support** for CG render passes with AOV selection
 - **Cryptomatte ID mattes** for object/material extraction with dropdown file selection
 - **Depth-based compositing** (ZDefocus, ZMerge) for CG workflows
 - **Visual effects** (Glow, Defocus, Sharpen) for professional finishing
-- **Professional color grading** with Bezier curves
 - **Procedural generators** (Ramp, Noise with 10 algorithms) for masks and textures
 - **Premultiplied alpha workflow** for accurate compositing
-- **GPU-accelerated** operations using PyTorch
 - **Batch processing** support for efficient workflows
 - **Industry-standard** blend modes and color operations
 
@@ -104,22 +103,21 @@ If you prefer not to use git:
 - **SeamBlender** - Remove AI tiling seams
 
 ### Color Grading
-- **Grade** - Lift/Gamma/Gain (Nuke-style)
-- **ColorCorrect** - Quick adjustments (saturation, contrast, gamma, hue shift)
-- **ColorCurves** - Bezier RGB curves
-- **HueSatVal** - HSV manipulation
-- **Saturation** - Saturation control
+- **Grade** - Nuke-style Lift/Gamma/Gain (Vectorized GPU)
+- **ColorCorrect** - Quick adjustments with high precision (Vectorized GPU)
+- **ColorCurves** - (NEW) Professional Interactive Bezier curves with live histogram
+- **HueSatVal** - HSV manipulation (Vectorized GPU)
+- **Saturation** - Saturation control (Vectorized GPU)
 - **Exposure** - Photographic exposure (f-stops)
-- **LUT** - 1D/3D LUT support
-- **Clamp** - Value range limiting
-- **Invert** - Color/channel inversion
+- **LUT** - 1D/3D LUT support (Vectorized GPU)
+- **Clamp** - Value range limiting (Vectorized GPU)
+- **Invert** - Color/channel inversion (Vectorized GPU)
 
 ### Keying & Matting
-- **ChromaKeyer** - Greenscreen/bluescreen keying
-- **LumaKeyer** - Brightness-based keying
-- **LumaKeyer Simple** - Quick luma keying
-- **RotoBezier** - Interactive Bezier spline drawing
-- **RotoBezier From Image** - Roto with image reference
+- **ChromaKeyer** - Professional greenscreen/bluescreen keying
+- **LumaKeyer** - Advanced brightness-based keying
+- **LumaKeyer Simple** - Fast luma keying
+- **RotoBezier** - (NEW) Interactive Pen Tool for rotoscoping with background tracing and Video/Batch support
 - **EdgeDefringe** - Remove edge artifacts
 - **MatteControl** - All-in-one matte refinement
 - **Erode/Dilate** - Matte expansion/contraction
@@ -159,7 +157,7 @@ If you prefer not to use git:
 ### I/O
 - **LoadEXR** - Multi-channel EXR loading
 
-**Total: 45 nodes** across all professional compositing workflows.
+**Total: 44 nodes** across all professional compositing workflows.
 
 ---
 

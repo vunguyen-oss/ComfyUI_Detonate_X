@@ -117,7 +117,7 @@ class DetonateMaskSmoother:
         invert: bool = False
     ) -> Tuple[torch.Tensor]:
         """
-        Apply professional edge smoothing and refinement to mask.
+        Apply professional edge smoothing and refinement to mask natively on GPU.
 
         Args:
             mask: Input mask tensor [B, H, W] or [H, W]
@@ -131,199 +131,102 @@ class DetonateMaskSmoother:
         Returns:
             Refined mask tensor [B, H, W]
         """
-        # Handle batch dimension
         if mask.dim() == 2:
             mask = mask.unsqueeze(0)  # [H, W] -> [1, H, W]
 
         B, H, W = mask.shape
+        device = mask.device
 
-        # Determine AA factor
-        aa_factor_map = {
-            "Off": 1,
-            "Low": 2,
-            "Medium": 4,
-            "High": 8
-        }
+        aa_factor_map = {"Off": 1, "Low": 2, "Medium": 4, "High": 8}
         aa_factor = aa_factor_map.get(antialias_quality, 4)
 
-        # Process each mask in batch
-        result_masks = []
+        mask_nchw = mask.unsqueeze(1).float()  # [B, 1, H, W]
 
-        for i in range(B):
-            mask_np = mask[i].cpu().numpy()
+        # Upsample for anti-aliasing if enabled
+        if aa_factor > 1:
+            aa_h, aa_w = H * aa_factor, W * aa_factor
+            mask_nchw = torch.nn.functional.interpolate(
+                mask_nchw, size=(aa_h, aa_w), mode='bilinear', align_corners=False
+            )
 
-            # Upsample for anti-aliasing if enabled
-            if aa_factor > 1:
-                aa_h = H * aa_factor
-                aa_w = W * aa_factor
-                mask_np = cv2.resize(
-                    mask_np,
-                    (aa_w, aa_h),
-                    interpolation=cv2.INTER_LINEAR
-                )
+        # Edge smoothing (bilateral-style filter preserves edges while smoothing)
+        if smooth_iterations > 0:
+            kernel_size = max(3, int(3 * aa_factor))
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            padding = kernel_size // 2
 
-            # Edge smoothing (bilateral-style filter preserves edges while smoothing)
-            if smooth_iterations > 0:
-                for _ in range(smooth_iterations):
-                    # Use morphological closing + opening to smooth jagged edges
-                    # while preserving overall shape
-                    kernel_size = max(3, int(3 * aa_factor))
-                    kernel = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (kernel_size, kernel_size)
-                    )
+            from ..filter.blur import DetonateBlur
+            blur_node = DetonateBlur()
+            blur_size = max(3, int(3 * aa_factor))
 
-                    # Close (fill small holes, smooth convex edges)
-                    mask_np = cv2.morphologyEx(
-                        mask_np,
-                        cv2.MORPH_CLOSE,
-                        kernel,
-                        iterations=1
-                    )
+            for _ in range(smooth_iterations):
+                # Close (fill small holes, smooth convex edges) = Dilation then Erosion
+                closed = torch.nn.functional.max_pool2d(mask_nchw, kernel_size=kernel_size, stride=1, padding=padding)
+                closed = -torch.nn.functional.max_pool2d(-closed, kernel_size=kernel_size, stride=1, padding=padding)
 
-                    # Open (remove small protrusions, smooth concave edges)
-                    mask_np = cv2.morphologyEx(
-                        mask_np,
-                        cv2.MORPH_OPEN,
-                        kernel,
-                        iterations=1
-                    )
+                # Open (remove small protrusions, smooth concave edges) = Erosion then Dilation
+                opened = -torch.nn.functional.max_pool2d(-closed, kernel_size=kernel_size, stride=1, padding=padding)
+                mask_nchw = torch.nn.functional.max_pool2d(opened, kernel_size=kernel_size, stride=1, padding=padding)
 
-                    # Gentle Gaussian blur to further smooth
-                    blur_size = max(3, int(3 * aa_factor))
-                    if blur_size % 2 == 0:
-                        blur_size += 1
-                    mask_np = cv2.GaussianBlur(
-                        mask_np,
-                        (blur_size, blur_size),
-                        sigmaX=0.5 * aa_factor
-                    )
+                # Gentle Gaussian blur to further smooth
+                mask_bhwc = mask_nchw.permute(0, 2, 3, 1)  # [B, H, W, 1]
+                mask_bhwc = blur_node.blur(mask_bhwc, blur_size, blur_size, blur_alpha=True)[0]
+                mask_nchw = mask_bhwc.permute(0, 3, 1, 2)
 
-            # Edge adjust (contract/expand)
-            if abs(edge_adjust) > 0.1:
-                scaled_adjust = edge_adjust * aa_factor
+        # Edge adjust (contract/expand)
+        if abs(edge_adjust) > 0.1:
+            scaled_adjust = edge_adjust * aa_factor
+            kernel_size = max(3, int(abs(scaled_adjust) * 2 + 1))
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+            padding = kernel_size // 2
 
-                # Convert to binary for morphology
-                binary_mask = (mask_np > 0.5).astype(np.uint8)
+            binary_mask = (mask_nchw > 0.5).float()
 
-                if scaled_adjust > 0:
-                    # Dilate (expand)
-                    kernel_size = max(3, int(abs(scaled_adjust) * 2 + 1))
-                    if kernel_size % 2 == 0:
-                        kernel_size += 1
-                    kernel = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (kernel_size, kernel_size)
-                    )
-                    binary_mask = cv2.dilate(
-                        binary_mask,
-                        kernel,
-                        iterations=1
-                    )
-                else:
-                    # Erode (contract)
-                    kernel_size = max(3, int(abs(scaled_adjust) * 2 + 1))
-                    if kernel_size % 2 == 0:
-                        kernel_size += 1
-                    kernel = cv2.getStructuringElement(
-                        cv2.MORPH_ELLIPSE,
-                        (kernel_size, kernel_size)
-                    )
-                    binary_mask = cv2.erode(
-                        binary_mask,
-                        kernel,
-                        iterations=1
-                    )
+            if scaled_adjust > 0:
+                # Dilate (expand)
+                mask_nchw = torch.nn.functional.max_pool2d(binary_mask, kernel_size=kernel_size, stride=1, padding=padding)
+            else:
+                # Erode (contract)
+                mask_nchw = -torch.nn.functional.max_pool2d(-binary_mask, kernel_size=kernel_size, stride=1, padding=padding)
 
-                mask_np = binary_mask.astype(np.float32)
+        # Feathering using GPU blur approximation (replaces CPU distance transform)
+        if feather > 0.1:
+            feather_radius = feather * aa_factor
+            if feather_radius > 0:
+                from ..filter.blur import DetonateBlur
+                blur_node = DetonateBlur()
+                mask_bhwc = mask_nchw.permute(0, 2, 3, 1)
+                
+                # Approximate SDF falloff variants with Gaussian Blur equivalents
+                if feather_type == "Gaussian":
+                    mask_bhwc = blur_node.blur(mask_bhwc, feather_radius * 2, feather_radius * 2, blur_alpha=True)[0]
+                elif feather_type == "Linear":
+                    mask_bhwc = blur_node.blur(mask_bhwc, feather_radius * 1.5, feather_radius * 1.5, blur_alpha=True)[0]
+                else:  # "Smooth"
+                    mask_bhwc = blur_node.blur(mask_bhwc, feather_radius, feather_radius, blur_alpha=True)[0]
+                    # Smoothstep for natural falloff
+                    mask_bhwc = mask_bhwc * mask_bhwc * (3.0 - 2.0 * mask_bhwc)
+                    
+                mask_nchw = mask_bhwc.permute(0, 3, 1, 2)
 
-            # Feathering using distance transform
-            if feather > 0.1:
-                mask_np = self._apply_feather(
-                    mask_np,
-                    feather * aa_factor,
-                    feather_type
-                )
+        # Downsample if anti-aliasing was used
+        if aa_factor > 1:
+            mask_nchw = torch.nn.functional.interpolate(
+                mask_nchw, size=(H, W), mode='area'
+            )
 
-            # Downsample if anti-aliasing was used
-            if aa_factor > 1:
-                mask_np = cv2.resize(
-                    mask_np,
-                    (W, H),
-                    interpolation=cv2.INTER_AREA  # Best for downsampling
-                )
+        mask_out = mask_nchw.squeeze(1)
 
-            # Invert if requested
-            if invert:
-                mask_np = 1.0 - mask_np
+        # Invert if requested
+        if invert:
+            mask_out = 1.0 - mask_out
 
-            # Ensure range [0, 1]
-            mask_np = np.clip(mask_np, 0.0, 1.0)
+        # Ensure range [0, 1]
+        mask_out = torch.clamp(mask_out, 0.0, 1.0)
 
-            result_masks.append(torch.from_numpy(mask_np))
-
-        # Stack batch
-        result = torch.stack(result_masks, dim=0)
-
-        return (result,)
-
-    def _apply_feather(
-        self,
-        mask: np.ndarray,
-        feather_radius: float,
-        feather_type: str = "Smooth"
-    ) -> np.ndarray:
-        """
-        Apply feathering using distance transform.
-
-        Args:
-            mask: Input mask [H, W] in range [0, 1]
-            feather_radius: Feather radius in pixels
-            feather_type: Falloff curve type
-
-        Returns:
-            Feathered mask [H, W]
-        """
-        if feather_radius < 0.1:
-            return mask
-
-        # Convert to binary for distance transform
-        binary_mask = (mask > 0.5).astype(np.uint8)
-
-        # Compute distance transforms (inside and outside)
-        dist_inside = cv2.distanceTransform(
-            binary_mask,
-            cv2.DIST_L2,
-            cv2.DIST_MASK_PRECISE
-        )
-        dist_outside = cv2.distanceTransform(
-            1 - binary_mask,
-            cv2.DIST_L2,
-            cv2.DIST_MASK_PRECISE
-        )
-
-        # Signed distance field
-        sdf = dist_inside - dist_outside
-
-        # Map distance to [0, 1] over feather range
-        t = np.clip((sdf + feather_radius) / (2 * feather_radius), 0.0, 1.0)
-
-        # Apply selected falloff curve
-        if feather_type == "Linear":
-            feathered = t
-        elif feather_type == "Smooth":
-            # Smoothstep for natural falloff
-            feathered = t * t * (3.0 - 2.0 * t)
-        elif feather_type == "Gaussian":
-            # Gaussian falloff
-            sigma = 1.0
-            x = (t - 0.5) * 6.0
-            feathered = np.exp(-0.5 * (x / sigma) ** 2)
-            feathered = np.clip(feathered, 0.0, 1.0)
-        else:
-            feathered = t * t * (3.0 - 2.0 * t)
-
-        return feathered.astype(np.float32)
+        return (mask_out,)
 
 
 class DetonateMaskFromColor:

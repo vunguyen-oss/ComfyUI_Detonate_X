@@ -121,7 +121,7 @@ class DetonateMatteControl:
         preview_mode: str = "Final"
     ) -> Tuple[torch.Tensor]:
         """
-        Refine matte using professional matte control operations.
+        Refine matte using professional operations on GPU.
 
         Processing order:
         1. Erode/Dilate (contract/expand edges)
@@ -141,162 +141,63 @@ class DetonateMatteControl:
         Returns:
             Refined mask [B, H, W]
         """
-        device = mask.device
-        B, H, W = mask.shape
+        matte = mask.clone()
 
-        # Process each mask in batch
-        result = []
-        for b in range(B):
-            matte = mask[b].cpu().numpy()  # [H, W]
-
-            # Stage 1: Erode/Dilate
-            if abs(erode_dilate) > 0.01:
-                matte = self._erode_dilate(matte, erode_dilate)
-
-            if preview_mode == "After Erode/Dilate":
-                result.append(torch.from_numpy(matte).to(device))
-                continue
-
-            # Stage 2: Blur
-            if blur > 0.01:
-                matte = self._blur(matte, blur)
-
-            if preview_mode == "After Blur":
-                result.append(torch.from_numpy(matte).to(device))
-                continue
-
-            # Stage 3: Gamma
-            if abs(gamma - 1.0) > 0.001:
-                matte = self._gamma_correct(matte, gamma)
-
-            if preview_mode == "After Gamma":
-                result.append(torch.from_numpy(matte).to(device))
-                continue
-
-            # Stage 4: Black/White point clipping
-            if abs(black_point) > 0.001 or abs(white_point - 1.0) > 0.001:
-                matte = self._clip_levels(matte, black_point, white_point)
-
-            # Final result
-            result.append(torch.from_numpy(matte).to(device))
-
-        output = torch.stack(result, dim=0)
-
-        return (output,)
-
-    def _erode_dilate(self, matte: np.ndarray, amount: float) -> np.ndarray:
-        """
-        Erode (shrink) or dilate (expand) the matte.
-
-        Args:
-            matte: Input matte [H, W]
-            amount: Negative = erode, Positive = dilate
-
-        Returns:
-            Processed matte [H, W]
-        """
-        if abs(amount) < 0.01:
-            return matte
-
-        # Convert to uint8 for OpenCV morphological operations
-        matte_uint8 = (np.clip(matte, 0, 1) * 255).astype(np.uint8)
-
-        # Create kernel
-        kernel_size = int(abs(amount) * 2 + 1)
-        if kernel_size % 2 == 0:
-            kernel_size += 1  # Must be odd
-        kernel_size = max(3, kernel_size)
-
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-
-        # Apply erosion or dilation
-        if amount < 0:
-            # Erode (contract)
+        # Stage 1: Erode/Dilate
+        if abs(erode_dilate) > 0.01:
+            amount = erode_dilate
+            kernel_size = int(abs(amount) * 2 + 1)
+            if kernel_size % 2 == 0: 
+                kernel_size += 1
+            kernel_size = max(3, kernel_size)
+            padding = kernel_size // 2
+            
+            matte_nchw = matte.unsqueeze(1) # [B, 1, H, W]
             iterations = max(1, int(abs(amount) / 2))
-            processed = cv2.erode(matte_uint8, kernel, iterations=iterations)
-        else:
-            # Dilate (expand)
-            iterations = max(1, int(amount / 2))
-            processed = cv2.dilate(matte_uint8, kernel, iterations=iterations)
+            
+            for _ in range(iterations):
+                if amount < 0:
+                    # Erode
+                    matte_nchw = -torch.nn.functional.max_pool2d(
+                        -matte_nchw, kernel_size=kernel_size, stride=1, padding=padding
+                    )
+                else:
+                    # Dilate
+                    matte_nchw = torch.nn.functional.max_pool2d(
+                        matte_nchw, kernel_size=kernel_size, stride=1, padding=padding
+                    )
+            
+            matte = matte_nchw.squeeze(1)
 
-        # Convert back to float
-        return processed.astype(np.float32) / 255.0
+        if preview_mode == "After Erode/Dilate":
+            return (matte,)
 
-    def _blur(self, matte: np.ndarray, blur_radius: float) -> np.ndarray:
-        """
-        Apply Gaussian blur to soften matte edges.
+        # Stage 2: Blur
+        if blur > 0.01:
+            from ..filter.blur import DetonateBlur
+            blur_node = DetonateBlur()
+            # DetonateBlur expects [B, H, W, C]. We have [B, H, W]
+            matte_bhwc = matte.unsqueeze(-1)
+            # blur_node.blur returns a tuple
+            matte_bhwc = blur_node.blur(matte_bhwc, blur, blur, blur_alpha=True)[0]
+            matte = matte_bhwc.squeeze(-1)
 
-        Args:
-            matte: Input matte [H, W]
-            blur_radius: Blur radius in pixels
+        if preview_mode == "After Blur":
+            return (matte,)
 
-        Returns:
-            Blurred matte [H, W]
-        """
-        if blur_radius < 0.01:
-            return matte
+        # Stage 3: Gamma
+        if abs(gamma - 1.0) > 0.001:
+            matte = torch.clamp(matte, 0.0, 1.0)
+            matte = torch.pow(matte, gamma)
 
-        # Calculate kernel size (must be odd)
-        kernel_size = int(blur_radius * 2) * 2 + 1
-        kernel_size = max(3, kernel_size)
+        if preview_mode == "After Gamma":
+            return (matte,)
 
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(
-            matte,
-            (kernel_size, kernel_size),
-            sigmaX=blur_radius,
-            sigmaY=blur_radius
-        )
+        # Stage 4: Black/White point clipping
+        if abs(black_point) > 0.001 or abs(white_point - 1.0) > 0.001:
+            if black_point >= white_point:
+                white_point = black_point + 0.001
+            matte = torch.clamp((matte - black_point) / (white_point - black_point + 1e-7), 0.0, 1.0)
 
-        return blurred
-
-    def _gamma_correct(self, matte: np.ndarray, gamma: float) -> np.ndarray:
-        """
-        Apply gamma correction to adjust matte density.
-
-        Args:
-            matte: Input matte [H, W]
-            gamma: Gamma value (< 1 = lighter, > 1 = darker)
-
-        Returns:
-            Gamma-corrected matte [H, W]
-        """
-        if abs(gamma - 1.0) < 0.001:
-            return matte
-
-        # Clamp to valid range before gamma
-        matte = np.clip(matte, 0.0, 1.0)
-
-        # Apply gamma correction
-        corrected = np.power(matte, gamma)
-
-        return corrected
-
-    def _clip_levels(
-        self,
-        matte: np.ndarray,
-        black_point: float,
-        white_point: float
-    ) -> np.ndarray:
-        """
-        Clip black and white points to clean up matte values.
-
-        Args:
-            matte: Input matte [H, W]
-            black_point: Values below this become 0.0
-            white_point: Values above this become 1.0
-
-        Returns:
-            Clipped matte [H, W]
-        """
-        # Ensure black_point < white_point
-        if black_point >= white_point:
-            white_point = black_point + 0.001
-
-        # Remap values
-        # Values below black_point → 0.0
-        # Values above white_point → 1.0
-        # Values between → linear remap to 0-1
-        clipped = np.clip((matte - black_point) / (white_point - black_point + 1e-7), 0.0, 1.0)
-
-        return clipped
+        # Final result
+        return (matte,)

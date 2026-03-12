@@ -164,41 +164,41 @@ class DetonateDisplacementMap:
             sample_x = x_coords + disp_x
             sample_y = y_coords + disp_y
 
-            # Handle edge modes
+            # Handle edge modes - preparation for grid_sample
             if edge_mode == "Clamp":
-                sample_x = torch.clamp(sample_x, 0, W - 1)
-                sample_y = torch.clamp(sample_y, 0, H - 1)
+                padding_mode = 'border'
             elif edge_mode == "Wrap":
+                # PyTorch grid_sample 'reflection' is not the same as wrap,
+                # so we manually modulo the coordinates, then use 'zeros'
                 sample_x = sample_x % W
                 sample_y = sample_y % H
-            # Black mode: out-of-bounds will return 0 in sampling
+                padding_mode = 'zeros'
+            else:  # Black
+                padding_mode = 'zeros'
 
-            # Convert to numpy for cv2.remap (more efficient than custom bilinear)
-            img_np = img.cpu().numpy()
-            map_x = sample_x.cpu().numpy().astype(np.float32)
-            map_y = sample_y.cpu().numpy().astype(np.float32)
+            # Normalize coordinates to [-1, 1] for grid_sample
+            norm_x = (sample_x / max(1, W - 1)) * 2.0 - 1.0
+            norm_y = (sample_y / max(1, H - 1)) * 2.0 - 1.0
 
-            # Apply displacement using cv2.remap (bilinear interpolation)
-            if edge_mode == "Black":
-                border_mode = cv2.BORDER_CONSTANT
-                border_value = 0.0
-            elif edge_mode == "Wrap":
-                border_mode = cv2.BORDER_WRAP
-                border_value = 0.0
-            else:  # Clamp
-                border_mode = cv2.BORDER_REPLICATE
-                border_value = 0.0
+            # Shape for grid_sample: [1, H, W, 2]
+            grid = torch.stack((norm_x, norm_y), dim=-1).unsqueeze(0)
 
-            displaced = cv2.remap(
-                img_np,
-                map_x,
-                map_y,
-                interpolation=cv2.INTER_LINEAR,
-                borderMode=border_mode,
-                borderValue=border_value
+            # Shape for input: [1, C, H, W]
+            input_img = img.permute(2, 0, 1).unsqueeze(0)
+
+            # Apply displacement using PyTorch native grid_sample
+            displaced = torch.nn.functional.grid_sample(
+                input_img,
+                grid,
+                mode='bilinear',
+                padding_mode=padding_mode,
+                align_corners=True
             )
 
-            result.append(torch.from_numpy(displaced).to(device))
+            # Convert back to [H, W, C]
+            displaced = displaced.squeeze(0).permute(1, 2, 0)
+
+            result.append(displaced)
 
         output = torch.stack(result, dim=0)
 
